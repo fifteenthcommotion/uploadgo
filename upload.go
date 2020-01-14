@@ -18,7 +18,56 @@ import (
 	"time"
 )
 
+const GET_TOKEN = 0
+const VERIFY_TOKEN = 1
+
 var dir string
+var operation chan int
+var token chan string
+var result chan bool
+
+func token_engine() {
+	const nrandb = 16
+	var randb []byte
+	var op int
+	var tok string
+	var tok_storage_old map[string]bool = map[string]bool{}
+	var tok_storage map[string]bool = map[string]bool{}
+	var has bool
+	var oldhas bool
+	var err error
+	var t time.Time = time.Now()
+	for {
+		op = <-operation /* locking mechanism */
+		if op == GET_TOKEN {
+			randb = make([]byte, nrandb)
+			_, err = rand.Read(randb)
+			check_err(err)
+			tok = hex.EncodeToString(randb)
+			tok_storage[tok] = true
+			token <- tok
+		} else if op == VERIFY_TOKEN {
+			tok = <-token
+			_, has = tok_storage[tok]
+			_, oldhas = tok_storage_old[tok]
+			if has == true {
+				delete(tok_storage, tok)
+				result <- true
+			} else if oldhas == true {
+				delete(tok_storage_old, tok)
+				result <- true
+			} else {
+				result <- false
+			}
+		}
+		if time.Now().Sub(t).Hours() > 10 {
+			/* roll tokens */
+			t = time.Now()
+			tok_storage_old = tok_storage
+			tok_storage = map[string]bool{}
+		}
+	}
+}
 
 func check_err(err error) {
 	if err != nil {
@@ -27,9 +76,13 @@ func check_err(err error) {
 }
 
 func write_page(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "text/html")
+	var tok string
+	operation <- GET_TOKEN /* lock */
+	tok = <-token
+
 	/* multiple file upload added in html5, so html5 */
-	fmt.Fprintln(w, `<!DOCTYPE html>
+	w.Header().Set("Content-Type", "text/html")
+	fmt.Fprintf(w, `<!DOCTYPE html>
 <html>
 <head>
 	<title>Upload</title>
@@ -37,10 +90,11 @@ func write_page(w http.ResponseWriter) {
 <body>
 	<form method="POST" enctype="multipart/form-data">
 	<input type="file" name="file" multiple>
+	<input type="hidden" name="csrf" value="%s">
 	<input type="submit" value="Submit">
 	</form>
 </body>
-</html>`)
+</html>`, tok)
 }
 
 func handler_upload(w http.ResponseWriter, r *http.Request) {
@@ -54,6 +108,7 @@ func handler_upload(w http.ResponseWriter, r *http.Request) {
 	var in multipart.File
 	var out *os.File
 	var err error
+	var auth bool
 	if r.Method == "GET" {
 		write_page(w)
 		return
@@ -69,6 +124,20 @@ func handler_upload(w http.ResponseWriter, r *http.Request) {
 	}
 	/* it's gonna be plaintext, baby! */
 	w.Header().Set("Content-Type", "text/plain")
+	auth = false
+	for name, value := range r.MultipartForm.Value {
+		if name == "csrf" && len(value) > 0 {
+			operation <- VERIFY_TOKEN /* lock */
+			token <- value[0]
+			if <-result {
+				auth = true
+			}
+		}
+	}
+	if auth == false {
+		http.Error(w, "403 Forbidden", 403)
+		return
+	}
 	for name, headers := range r.MultipartForm.File {
 		if name == "file" && len(headers) > 0 {
 			randb = make([]byte, numrandb)
@@ -138,6 +207,11 @@ func main() {
 
 	err = unix.Pledge("stdio rpath wpath cpath unix", "")
 	check_err(err)
+
+	operation = make(chan int)
+	token = make(chan string)
+	result = make(chan bool)
+	go token_engine() /* after pledge */
 
 	syscall.Umask(umask) /* umask for file writes */
 	log.Fatal(fcgi.Serve(l, http.DefaultServeMux))
