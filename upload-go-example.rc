@@ -1,0 +1,11 @@
+#!/bin/ksh
+
+daemon="/usr/local/bin/upload-go"
+daemon_user="_uploadgo"
+daemon_flags="-gid=67 -sockumask=0117 -umask=0022 -dir=/var/www/htdocs/default/uploads/ -sock=/var/www/run/uploadgo/upload-go.sock"
+
+. /etc/rc.d/rc.subr
+
+rc_reload=NO
+rc_bg=YES
+rc_cmd $1
